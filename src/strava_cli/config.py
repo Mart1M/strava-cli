@@ -220,16 +220,14 @@ class Config:
             self.auth = AuthConfig()
 
 
-def get_client_credentials(config: Config | None = None) -> tuple[str | None, str | None]:
-    """Get client ID and secret from environment or config.
+def get_client_credentials(config: Config | None = None) -> tuple[str, str]:
+    """Get client ID and secret.
 
-    Priority: environment variables > config file
+    Priority: environment variables > config file > built-in app credentials
     """
-    # Check environment variables first
     client_id = os.environ.get("STRAVA_CLIENT_ID")
     client_secret = os.environ.get("STRAVA_CLIENT_SECRET")
 
-    # Fall back to config file
     if not client_id or not client_secret:
         if config is None:
             config = Config.load()
@@ -238,13 +236,26 @@ def get_client_credentials(config: Config | None = None) -> tuple[str | None, st
         if not client_secret:
             client_secret = config.client_secret
 
+    if not client_id:
+        client_id = DEFAULT_CLIENT_ID
+    if not client_secret:
+        client_secret = DEFAULT_CLIENT_SECRET
+
     return client_id, client_secret
+
+
+# Built-in Strava API app (Mart1M/strava-cli). Override via env or [client] in config.
+DEFAULT_CLIENT_ID = "218318"
+DEFAULT_CLIENT_SECRET = "45977b77318e9ccf6938c570d7f34129177fcaf6"
+
+# Hosted OAuth broker (Coolify). Override via env or [oauth] callback_url in config.
+DEFAULT_OAUTH_CALLBACK_URL = "https://cs44owkwc848kg00444gccks.mart1m.fr"
 
 
 def get_oauth_callback_url(config: Config | None = None) -> str | None:
     """Get hosted OAuth callback base URL (no trailing path).
 
-    Priority: STRAVA_OAUTH_CALLBACK_URL env > config [oauth] callback_url
+    Priority: STRAVA_OAUTH_CALLBACK_URL env > config [oauth] callback_url > default
     """
     if url := os.environ.get("STRAVA_OAUTH_CALLBACK_URL"):
         return url.rstrip("/")
@@ -255,4 +266,4 @@ def get_oauth_callback_url(config: Config | None = None) -> str | None:
     if config.oauth.callback_url:
         return config.oauth.callback_url.rstrip("/")
 
-    return None
+    return DEFAULT_OAUTH_CALLBACK_URL
