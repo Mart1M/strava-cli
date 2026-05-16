@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import secrets
 import socketserver
 import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass
 
 import httpx
 
-from strava_cli.config import Config, get_client_credentials, get_config_path
+from strava_cli.config import (
+    Config,
+    get_client_credentials,
+    get_config_path,
+    get_oauth_callback_url,
+)
 
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
@@ -201,8 +208,14 @@ def prompt_for_credentials() -> tuple[str, str] | None:
     print("\nTo authenticate, you need a Strava API application:", file=sys.stderr)
     print("  1. Go to https://www.strava.com/settings/api", file=sys.stderr)
     print("  2. Create an application", file=sys.stderr)
-    print("  3. Set 'Authorization Callback Domain' to: localhost", file=sys.stderr)
-    print("  4. Note your Client ID and Client Secret", file=sys.stderr)
+    callback_url = get_oauth_callback_url()
+    if callback_url:
+        domain = urllib.parse.urlparse(callback_url).netloc
+        print(f"  3. Set 'Authorization Callback Domain' to: {domain}", file=sys.stderr)
+        print(f"  4. Set redirect URI to: {callback_url}/callback", file=sys.stderr)
+    else:
+        print("  3. Set 'Authorization Callback Domain' to: localhost", file=sys.stderr)
+    print("  5. Note your Client ID and Client Secret", file=sys.stderr)
     print("", file=sys.stderr)
 
     try:
@@ -222,36 +235,54 @@ def prompt_for_credentials() -> tuple[str, str] | None:
         return None
 
 
-def interactive_login(
+def wait_for_remote_callback(
+    callback_base_url: str,
+    state: str,
+    timeout: int = 120,
+    poll_interval: float = 1.0,
+) -> tuple[str | None, str | None]:
+    """Poll the hosted OAuth broker until Strava redirects with a code.
+
+    Returns:
+        Tuple of (authorization_code, error_message)
+    """
+    poll_url = f"{callback_base_url.rstrip('/')}/poll"
+    deadline = time.time() + timeout
+
+    with httpx.Client() as client:
+        while time.time() < deadline:
+            try:
+                response = client.get(poll_url, params={"state": state}, timeout=10.0)
+            except httpx.HTTPError as exc:
+                print(f"error: OAuth poll failed: {exc}", file=sys.stderr)
+                return None, str(exc)
+
+            if response.status_code == 404:
+                time.sleep(poll_interval)
+                continue
+
+            if response.status_code == 410:
+                return None, "Authorization session expired"
+
+            if response.status_code >= 400:
+                detail = response.text
+                with contextlib.suppress(Exception):
+                    detail = response.json().get("detail", detail)
+                return None, str(detail)
+
+            data = response.json()
+            return data.get("code"), None
+
+    return None, "timeout"
+
+
+def interactive_login_local(
+    client_id: str,
+    client_secret: str,
     scopes: list[str] | None = None,
     port: int = 8000,
 ) -> AuthResult | None:
-    """Perform interactive OAuth login flow.
-
-    Opens browser for user authorization, starts local callback server.
-
-    Args:
-        scopes: OAuth scopes to request
-        port: Port for callback server
-
-    Returns:
-        AuthResult if successful, None otherwise
-    """
-    config = Config.load()
-    client_id, client_secret = get_client_credentials(config)
-
-    if not client_id or not client_secret:
-        result = prompt_for_credentials()
-        if result is None:
-            return None
-        client_id, client_secret = result
-
-        # Save credentials to config
-        config.client_id = client_id
-        config.client_secret = client_secret
-        config.save()
-        print(f"\nCredentials saved to {get_config_path()}", file=sys.stderr)
-
+    """OAuth login using a local callback server on localhost."""
     redirect_uri = f"http://localhost:{port}/callback"
     state = secrets.token_urlsafe(16)
 
@@ -261,13 +292,9 @@ def interactive_login(
     print("\nIf browser doesn't open, visit:", file=sys.stderr)
     print(f"{auth_url}", file=sys.stderr)
 
-    # Start callback server
     server = start_callback_server(port)
-
-    # Open browser
     webbrowser.open(auth_url)
 
-    # Wait for callback
     print("\nWaiting for authorization...", file=sys.stderr)
 
     def handle_request():
@@ -291,16 +318,99 @@ def interactive_login(
         print("error: State mismatch - possible CSRF attack", file=sys.stderr)
         return None
 
-    print("Authorization code received, exchanging for token...", file=sys.stderr)
+    return _exchange_and_report(client_id, client_secret, OAuthCallbackHandler.auth_code)
 
+
+def interactive_login_remote(
+    client_id: str,
+    client_secret: str,
+    callback_base_url: str,
+    scopes: list[str] | None = None,
+) -> AuthResult | None:
+    """OAuth login using a hosted callback URL (e.g. Coolify)."""
+    redirect_uri = f"{callback_base_url.rstrip('/')}/callback"
+    state = secrets.token_urlsafe(16)
+
+    auth_url = build_auth_url(client_id, redirect_uri, state, scopes)
+
+    print("Opening browser for Strava authorization...", file=sys.stderr)
+    print("\nIf browser doesn't open, visit:", file=sys.stderr)
+    print(f"{auth_url}", file=sys.stderr)
+
+    webbrowser.open(auth_url)
+
+    print("\nWaiting for authorization in browser...", file=sys.stderr)
+
+    auth_code, error = wait_for_remote_callback(callback_base_url, state)
+
+    if error:
+        print(f"error: Authorization failed: {error}", file=sys.stderr)
+        return None
+
+    if not auth_code:
+        print("error: No authorization code received", file=sys.stderr)
+        return None
+
+    return _exchange_and_report(client_id, client_secret, auth_code)
+
+
+def _exchange_and_report(client_id: str, client_secret: str, auth_code: str) -> AuthResult | None:
+    print("Authorization code received, exchanging for token...", file=sys.stderr)
     try:
-        result = exchange_code_for_token(
-            client_id,
-            client_secret,
-            OAuthCallbackHandler.auth_code,
-        )
+        result = exchange_code_for_token(client_id, client_secret, auth_code)
         print("Authentication successful!", file=sys.stderr)
         return result
     except Exception as e:
         print(f"error: Token exchange failed: {e}", file=sys.stderr)
         return None
+
+
+def interactive_login(
+    scopes: list[str] | None = None,
+    port: int = 8000,
+    use_local: bool = False,
+) -> AuthResult | None:
+    """Perform interactive OAuth login flow.
+
+    Opens the browser for Strava authorization. Uses a hosted callback URL when
+    STRAVA_OAUTH_CALLBACK_URL is set (or [oauth] callback_url in config), unless
+    use_local is True.
+
+    Args:
+        scopes: OAuth scopes to request
+        port: Port for local callback server (only when use_local=True)
+        use_local: Force localhost callback instead of hosted broker
+
+    Returns:
+        AuthResult if successful, None otherwise
+    """
+    config = Config.load()
+    client_id, client_secret = get_client_credentials(config)
+
+    if not client_id or not client_secret:
+        result = prompt_for_credentials()
+        if result is None:
+            return None
+        client_id, client_secret = result
+
+        config.client_id = client_id
+        config.client_secret = client_secret
+        config.save()
+        print(f"\nCredentials saved to {get_config_path()}", file=sys.stderr)
+
+    callback_base_url = None if use_local else get_oauth_callback_url(config)
+
+    if callback_base_url:
+        return interactive_login_remote(
+            client_id,
+            client_secret,
+            callback_base_url,
+            scopes=scopes,
+        )
+
+    return interactive_login_local(
+        client_id,
+        client_secret,
+        scopes=scopes,
+        port=port,
+    )

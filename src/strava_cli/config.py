@@ -51,6 +51,13 @@ class AuthConfig:
 
 
 @dataclass
+class OAuthConfig:
+    """OAuth flow settings."""
+
+    callback_url: str | None = None
+
+
+@dataclass
 class DefaultsConfig:
     """Default settings."""
 
@@ -63,6 +70,7 @@ class Config:
     """Main configuration."""
 
     auth: AuthConfig = field(default_factory=AuthConfig)
+    oauth: OAuthConfig = field(default_factory=OAuthConfig)
     defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
     profiles: dict[str, AuthConfig] = field(default_factory=dict)
     client_id: str | None = None
@@ -106,6 +114,12 @@ class Config:
                 scopes=auth_data.get("scopes", []),
             )
 
+        # Parse oauth section
+        if oauth_data := data.get("oauth"):
+            config.oauth = OAuthConfig(
+                callback_url=oauth_data.get("callback_url"),
+            )
+
         # Parse defaults section
         if defaults_data := data.get("defaults"):
             config.defaults = DefaultsConfig(
@@ -132,6 +146,8 @@ class Config:
             self.auth.access_token = token
         if refresh := os.environ.get("STRAVA_REFRESH_TOKEN"):
             self.auth.refresh_token = refresh
+        if callback_url := os.environ.get("STRAVA_OAUTH_CALLBACK_URL"):
+            self.oauth.callback_url = callback_url
 
     def save(self, path: Path | None = None) -> None:
         """Save configuration to TOML file."""
@@ -223,3 +239,20 @@ def get_client_credentials(config: Config | None = None) -> tuple[str | None, st
             client_secret = config.client_secret
 
     return client_id, client_secret
+
+
+def get_oauth_callback_url(config: Config | None = None) -> str | None:
+    """Get hosted OAuth callback base URL (no trailing path).
+
+    Priority: STRAVA_OAUTH_CALLBACK_URL env > config [oauth] callback_url
+    """
+    if url := os.environ.get("STRAVA_OAUTH_CALLBACK_URL"):
+        return url.rstrip("/")
+
+    if config is None:
+        config = Config.load()
+
+    if config.oauth.callback_url:
+        return config.oauth.callback_url.rstrip("/")
+
+    return None

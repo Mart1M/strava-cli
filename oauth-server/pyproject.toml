@@ -1,0 +1,16 @@
+[project]
+name = "strava-cli-oauth"
+version = "0.1.0"
+description = "OAuth callback broker for strava-cli"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["strava_oauth_server"]

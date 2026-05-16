@@ -29,18 +29,32 @@ def login(
         int,
         typer.Option(
             "--port",
-            help="Local port for OAuth callback",
+            help="Local port for OAuth callback (only with --local)",
         ),
     ] = 8000,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Use localhost callback instead of hosted OAuth broker",
+        ),
+    ] = False,
 ) -> None:
     """Authenticate with Strava via OAuth.
 
-    Opens a browser window for authorization. Requires STRAVA_CLIENT_ID
-    and STRAVA_CLIENT_SECRET environment variables.
+    Opens your browser for Strava authorization. By default uses the hosted
+    OAuth callback when STRAVA_OAUTH_CALLBACK_URL is set; use --local for
+    a localhost callback server.
+
+    Requires STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET (env or config file).
     """
     scope_list = scopes.split(",") if scopes else None
 
-    result = auth_helpers.interactive_login(scopes=scope_list, port=port)
+    result = auth_helpers.interactive_login(
+        scopes=scope_list,
+        port=port,
+        use_local=local,
+    )
 
     if result is None:
         raise typer.Exit(2)
