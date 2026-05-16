@@ -249,7 +249,7 @@ DEFAULT_CLIENT_ID = "218318"
 DEFAULT_CLIENT_SECRET = "45977b77318e9ccf6938c570d7f34129177fcaf6"
 
 # Hosted OAuth broker (Coolify). Override via env or [oauth] callback_url in config.
-DEFAULT_OAUTH_CALLBACK_URL = "https://cs44owkwc848kg00444gccks.mart1m.fr"
+DEFAULT_OAUTH_CALLBACK_URL = "https://strava-oauth.mart1m.fr"
 
 
 def get_oauth_callback_url(config: Config | None = None) -> str | None:
